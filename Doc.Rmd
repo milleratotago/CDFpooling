@@ -1,0 +1,139 @@
+---
+title: "CDFpooling Documentation"
+author: "Jeff Miller"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+### Introduction
+
+This document explains how to use the software routines in `CDFpooling.R` to carry out the "CDF pooling" analyses described by Miller (2024, unpublished).
+In brief, the software does two things:
+
+1) Estimate parameters of the ex-Gaussian reaction time (RT) distributions separately for each combination of subject and condition.
+2) Compute the cumulative distribution function (CDF) values of all observed RTs within each condition.
+
+Histograms of these CDF values pooled across conditions may be useful in revealing the presence of RT outliers (Miller, 2024).
+
+### Preparing the data to be analyzed
+
+The main input to the `CDFpooling.R` routines is an R data frame.
+The routines assume that the data frame satisfies these formatting conditions:
+
+- It has one row per trial (the rows can be in any order).
+- It has variables `sub`, `cond`, and `rt` indicating the subject, condition, and RT for each trial.
+- Optionally, it may also have a Boolean variable `excluded` that is set to TRUE for any trials that should be excluded from the analysis (e.g., practice trials, errors, outliers, etc). If this variable is not present, all trials will be included.
+- Additional variables may be present; they will be ignored.
+
+The file `CDFpooling_example.csv` has an example dataset of the correct form.
+
+### Running the analysis
+
+A simple script to run the analysis looks like this:
+
+```{r, results='hide', message=FALSE, warning=FALSE}
+# Include the routines.
+# This will install the CRAN package 'gamlss' if you don't
+# already have it.
+source("CDFpooling.R")
+
+# Read your RT data into a data frame.
+rt_df <- read.csv("CDFpooling_example.csv")
+
+# If necessary, clean up your data so that the data frame satisfies the formatting conditions above.
+# Nothing is needed here for the example data file, because it is already in the right format.
+
+# Do the analysis.
+results_list <- CDFpooling_main(rt_df)
+```
+
+### Examining the results
+
+The output of the main routine, `results_list`, is a list with two elements.
+
+The first element, `results_list$cdf`, is a vector with one element for each trial of the input data frame. The value in the vector is the CDF of that trial's RT relative to the estimated ex-Gaussian distribution for the trial's subject and condition (or NaN for an excluded trial)
+It is usually most convenient to store these values as a new variable in the data frame like this:
+
+```{r}
+rt_df$cdf <- results_list$cdf
+```
+
+Then you can, for example, make histograms of the CDFs for trials in each condition to look for signs of fast or slow outliers (see Miller, 2024).
+
+```{r}
+# Define bin size for CDF histogram:
+bins <- seq(0,1,0.05)
+
+# Note: The example data file has two conditions
+par(mfrow = c(1,2))
+for (cond in 1:2) {
+  this_cond <- rt_df$cond == cond
+  hist(rt_df$cdf[this_cond], breaks = bins)
+}
+```
+
+The second element, `results_list$est_results_df`, is a data frame with the results of the ex-Gaussian fitting process for each combination of subject and condition.  There are a lot of variables in this data frame:
+
+```{r}
+ests_df <- results_list$est_results_df  # save into a more convenient variable
+str(ests_df)
+```
+
+- The variables `sub` and `cond` are the labels indicating the combination of subject and condition.
+- `n_trials` is the number of trials analyzed for that combination.
+- `estimated` is a boolean indicating whether the estimation was carried out. Estimation *is* carried out unless there are not enough trials (see optional argument `min_trials_required` described below).
+- `mu`, `sigma`, and `tau` are estimates of the ex-Gaussian parameters for this subject and condition.
+- Regarding `start_prop_tau_variance`, see the optional argument with this name described below. This is the `start_prop_tau_variance` value that produced the best fit from the `optim()` call, across all of the `optim()` calls for this subject and condition.
+- `value`, `convergence`, `count_function`, `count_gradient`, and `message` are all values returned by the `optim()` call that produced the best fit.
+
+You can use this output to see, for example, whether/how the values of the ex-Gaussian parameters differ across conditions:
+
+```{r}
+aggregate(ests_df$mu, list(ests_df$cond), FUN=mean) 
+t.test(ests_df$mu[ests_df$cond == 1],ests_df$mu[ests_df$cond == 2], paired = TRUE)
+# and similarly for sigma and tau
+```
+
+\begin{comment}
+aggregate(ests_df$mu, list(ests_df$cond), FUN=mean) 
+aggregate(ests_df$sigma, list(ests_df$cond), FUN=mean) 
+aggregate(ests_df$tau, list(ests_df$cond), FUN=mean) 
+cond1 <- ests_df$cond == 1
+cond2 <- ests_df$cond == 2
+t.test(ests_df$mu[cond1],ests_df$mu[cond2], paired = TRUE)
+t.test(ests_df$sigma[cond1],ests_df$sigma[cond2], paired = TRUE)
+t.test(ests_df$tau[cond1],ests_df$tau[cond2], paired = TRUE)
+\end{comment}
+
+### Optional arguments
+
+There are quite a few optional arguments for the `CDFpooling_main()` function, as shown here:
+
+```{r eval=FALSE}
+CDFpooling_main <- function(rt_df,
+                            min_trials_required = 50,
+                            start_prop_var_in_tau = c(0.1, 0.3, 0.5, 0.7),
+                            rt_bounds = NULL,
+                            gr = NULL,
+                            method = "BFGS",
+                            lower = -Inf, upper = Inf,
+                            control = list(),
+                            hessian = FALSE)
+```
+
+- `rt_df` is the data frame with the trials--this is the only required argument.
+- `min_trials_required` indicates the minimum number of trials per subject/condition combination that are needed to fit the ex-Gaussian and then compute CDFs.  If the data file doesn't have this many trials for a particular combination, then no fit is carried out (and `est_results_df$estimated` is set to `FALSE` for that combination).
+- To increase the chances of actually finding the globally-best ex-Gaussian parameter estimates for a given subject/condition combination (i.e., rather than having the search process get stuck at some locally-best point), the `CDFpooling` routines call `optim()` multiple times with different starting values for each combination. The vector `start_prop_var_in_tau` controls the number and starting values of the different `optim()` calls, as follows (this method seems to work well):
+  - `optim()` is called once for each value of the vector `start_prop_var_in_tau`; for brevity I will denote the different values as `spvit[k]`, with `k` running from 1 to the length of the vector.
+  - In addition to the `spvit[k]` values, the starting values for each call also depend on the mean and variance of the RTs for the subject/condition combination being fit; call these values `rt_mean` and `rt_var`, respectively.
+  - The starting value `start_tau` is computed as `sqrt(spvit[k]*rt_var)`; this assigns the proportion `spvit[k]` of the total RT variance to the exponential component at the start.
+  - The remainders of `rt_mean` and `rt_var` are then assigned to the normal component. Specifically, `start_mu=rt_mean-start_tau` and `start_sigma=sqrt((1-spvit[k])*rt_var)`.  Thus, with its starting parameters the ex-Gaussian always has the same overall mean and variance as the observed RTs being fit. These different sets of starting parameters `start_mu`, `start_sigma`, and `start_tau` just differ in how they divide the overall mean and variance between the normal and exponential components of the ex-Gaussian.
+  - Note that the values of `spvit[k]` all have to be between 0 and 1 for this procedure to make sense (actually, between 0.01 and 0.99 to avoid numerical errors).
+- `rt_bounds` can be used to indicate that all RTs had to fall within a certain range.  If this argument is used, it should be a two-position vector, with the two values indicating the minimum and maximum values of the acceptable RT range, respectively.  If it is specified, this range is then used in computing the likelihood of the observed RTs.  For example, one might specify `rt_bounds = c(150,2000)` if RTs had to be between 150 and 2000 ms (e.g., RTs below 150 were discarded as anticipations and RTs couldn't be more than 2000 because the trial ended then).  This argument is included for generality, but it seems to have negligible effect unless there are a lot of RTs near one of the boundaries.
+- `gr`, `method`, `lower`, `control`, and `hessian` are all arguments that are just passed to `optim()`, so you can include them if you want more control over that function (and see their meanings in the documentation for `optim`).  However, the `CDFpooling` routines do set `control$fnscale` to -1 regardless of any input value that you pass in your `control` to make sure that `optim()` maximizes the likelihood function as desired.
+
+
